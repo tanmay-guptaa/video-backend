@@ -187,7 +187,6 @@ const logoutUser = asyncHandler(async(req, res) => {
 	.json(new ApiResponse(200, {}, "User Logged Out Successfully"))
 })
 
-//making endpoint of refresh token
 const refreshAccessToken = asyncHandler(async(req, res) => {
 	const incomingRefreshToken = req.cookies.refreshToken || req.body.refreshToken
 
@@ -231,4 +230,252 @@ const refreshAccessToken = asyncHandler(async(req, res) => {
     }
 })
 
-export {registerUser, loginUser, logoutUser, refreshAccessToken}
+const changeCurrentPassword = asyncHandler(async(req, res) => {
+	const {oldPassword, newPassword, confirmPassword} = req.body
+
+	if(!(newPassword === confirmPassword)){
+		throw new ApiError(400, "Password do not match")
+	}
+
+	const user              = await User.findById(req.user?._id)
+	const isPasswordCorrect = await user.isPasswordCorrect(oldPassword)
+
+	if(!isPasswordCorrect) {
+		throw new ApiError(400, "Invalid Old Password")
+	}
+
+	user.password = newPassword
+	await user.save({validateBeforeSave: false})
+
+	return res
+	.status(200)
+	.json(new ApiResponse(200, {}, "Password Changed Successfully"))
+})
+
+const getCurrentUser = asyncHandler(async(req, res) => {
+	return res
+	.status(200)
+	.json(200, req.user, "Current User Fetched Successfully")
+})
+
+const updateAccountDetails = asyncHandler(async(req, res) => {
+	const {fullname, email} = req.body
+	
+	if(!fullname || !email){
+		throw new ApiError(400, "All fields are required")
+	}
+
+	const user = await User.findByIdAndUpdate(
+		req.user?._id,
+		{
+			$set: {
+				fullname,    //can also write like this fullname: fullname it's your choice
+				email
+			}
+		},
+		{new: true}
+	).select("-password")
+
+	return res
+	.status(200)
+	.json(new ApiResponse(200, user, "Account Detail Updated Successfully"))
+}) 
+
+const updateUserAvtaar = asyncHandler(async(req, res) => {
+	/*
+	  take new avtaar image from inserted middleware multer request request.files
+	  validate that file recieved or not
+	  upload on server locally 
+	  delete the cloudinary url which is store in User.avtaar field 
+	  uploading new avtaar(recieved) image on cloudinary and take url from the cloudinary
+	  then update the user.avtaar file in the database
+	*/
+	const avtaarLocalPath = req.file?.path
+
+	if(!avtaarLocalPath){
+		throw new ApiError(400, "Avtaar file is necessary")
+	}
+
+	const avtaar = await uploadOnCloudinary(avtaarLocalPath)
+
+	if(!avtaar.url){
+		throw new ApiError(400, "Error while uploading on Avtaar")
+	}
+
+	const user = await User.findByIdAndUpdate(
+		req.user?._id,
+		{
+			$set: {
+				avtaar: avtaar.url
+			}
+		},
+		{new: true}
+	).select("-password")
+
+	return res
+	.status(200)
+	.json(new ApiResponse(200, user, "Avtaar Image Updated Successfully"))
+})
+
+const updateUserCoverImage = asyncHandler(async(req, res) => {
+	const coverImageLocalPath = req.file?.path
+
+	if(!coverImageLocalPath){
+		throw new ApiError(400, "Cover Image file is necessary")
+	}
+
+	const coverImage = await uploadOnCloudinary(coverImageLocalPath)
+
+	if(!coverImage.url){
+		throw new ApiError(400, "Error while uploading Cover Image")
+	}
+
+	const user = await User.findByIdAndUpdate(
+		req.user?._id,
+		{
+			$set: {
+				coverImage: coverImage.url
+			}
+		},
+		{new: true}
+	).select("-password")
+
+	return res
+	.status(200)
+	.json(new ApiResponse(200, user, "Cover Image Updated Successfully"))
+})
+
+const getUserChannelProfile = asyncHandler(async(req, res) =>{
+	const {username} = req.params
+
+	if(!username?.trim()){
+		throw new ApiError(400, "Username is missing")
+	}
+
+	const channel = await User.aggregate([
+		{
+			$match: {
+				username: username?.toLowerCase()
+			}
+		},
+		{
+			$lookup: {
+				from: "subscriptions",
+				localField: "_id",
+				foreignField: "channel",
+				as: "subscribers"  
+			}
+		},
+		{
+			$lookup: {
+				from: "subscriptions",
+				localField: "_id",
+				foreignField: "subscriber",
+				as: "subscribedTo"
+			}
+		},
+		{
+			$addFields: {
+				subscribersCount: {
+					$size: "$subscribers"    //$ sign shows that it is a field which is added
+				},
+				channelsSubscribedToCount: {
+					$size: "$subscribedTo"
+				},
+				isSubscribed: {
+					$cond: {
+						if: {$in: [req.user?._id, "$subscribers.subscriber"]},
+						then: true,
+					    else: false
+					}
+				}
+			}
+		},
+		{
+			$project: {
+				fullname: 1,
+				username: 1,
+				subscribersCount: 1,
+				channelsSubscribedToCount: 1,
+				isSubscribed: 1,
+				avtaar: 1,
+				coverImage: 1,
+				email: 1
+			}
+		}
+	])
+
+	if(!channel?.length){
+		throw new ApiError(404, "Channel does not exist")
+	}
+
+	return res
+	.status(200)
+	.json(
+		new ApiResponse(200, channel[0], "User Channel Fetched Successfully")
+	)
+})
+
+const getWatchHistory = asyncHandler(async(req, res) => {
+	const user = await User.aggregate([
+		{
+			$match: {
+				_id: new mongoose.Types.ObjectId(req.user._id) //we have done this because MongoDB gives string in id so with mongoose it convert string of this id into ObjecId
+			}
+		},
+		{
+			$lookup: {
+				from: "videos",
+				localField: "watchHistory",
+				foreignField: "_id",
+				as: "watchHistory",
+				pipeline: [
+					{
+						$lookup: {
+							from: "users",
+							localField: "owner",
+							foreignField: "_id",
+							as: "owner",
+							pipeline: [
+								{
+									$project: {
+										fullname: 1,
+										username: 1,
+										avtaar: 1
+									}
+								}
+							]
+						}
+					},
+					{
+						$addFields: {
+							owner: {
+								$first: "$owner"
+							}
+						}
+					}
+				]
+			}
+		}
+	])
+
+	return res
+	.status(200)
+	.json(
+		new ApiResponse(200, user[0].watchHistory, "Watch History Fetched Successfully")
+	)
+})
+
+export {
+	registerUser, 
+	loginUser, 
+	logoutUser, 
+	refreshAccessToken, 
+	changeCurrentPassword, 
+	getCurrentUser, 
+	updateAccountDetails, 
+	updateUserAvtaar, 
+	updateUserCoverImage,
+	getUserChannelProfile,
+	getWatchHistory
+}
